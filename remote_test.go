@@ -87,11 +87,12 @@ func TestChrome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error starting the ChromeDriver server: %v", err)
 	}
-
-	runTests(t, config{
+	c := config{
 		addr:    fmt.Sprintf("http://127.0.0.1:%d/wd/hub", port),
 		browser: *chromeBinary,
-	})
+	}
+	runTests(t, c)
+	t.Run("Extension", runTest(testExtension, c))
 
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Error stopping the ChromeDriver service: %v", err)
