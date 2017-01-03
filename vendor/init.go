@@ -1,3 +1,4 @@
+// The init binary downloads the WebDriver JARs and the ChromeDriver binary.
 package main
 
 import (
@@ -14,10 +15,15 @@ import (
 	"github.com/golang/glog"
 )
 
+// file represents a file to download.
 type file struct {
-	url    string
-	name   string
-	hash   string
+	// url is the URL from which to download the file.
+	url string
+	// name is the target filename to store the file.
+	name string
+	// hash is the expected sha256 hash of the file contents.
+	hash string
+	// rename specifies a pair of filenames: the which to rename from and to.
 	rename []string
 }
 
