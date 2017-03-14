@@ -52,8 +52,7 @@ expected.
 
 [issue]: https://github.com/tebeka/selenium/issues/new
 
-Below are known issues that affect the usage of this API. There are likely
-others filed on the respective issue trackers.
+## Known issues
 
 ### Selenium 2
 
@@ -206,6 +205,17 @@ To run the tests under Sauce, run:
 
 Test results can be viewed through the [Sauce Labs
 Dashboard](https://saucelabs.com/beta/dashboard/tests).
+
+## AppEngine
+
+Selenium WebDriver and its dependencies can be run on Google's AppEngine
+Flexible Environment using custom images. It cannot be easily run on the
+Standard Environment.
+
+An example of how to package and run a Go-based WebDriver program on AppEngine
+Flexible Environment is found in the [examples
+subdirectory](examples/appengine); see [the
+documentation](examples/appengine/README.md).
 
 ## License
 
