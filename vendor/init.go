@@ -19,7 +19,10 @@ import (
 	"sync"
 
 	"cloud.google.com/go/storage"
+	"github.com/blang/semver"
 	"github.com/golang/glog"
+	"github.com/google/go-github/github"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -47,12 +50,6 @@ var files = []file{
 		rename: []string{"chromedriver", "chromedriver-linux64-2.31"},
 	},
 	{
-		url:    "https://github.com/mozilla/geckodriver/releases/download/v0.18.0/geckodriver-v0.18.0-linux64.tar.gz",
-		name:   "geckodriver-v0.18.0-linux64.tar.gz",
-		hash:   "b78a0c5d2e249312d266d846e803e88a26477de20f33bfd635e164d27e59ae20",
-		rename: []string{"geckodriver", "geckodriver-v0.18.0-linux64"},
-	},
-	{
 		// This is a recent nightly. Update this path periodically.
 		url:     "https://archive.mozilla.org/pub/firefox/nightly/2017/08/2017-08-21-10-03-50-mozilla-central/firefox-57.0a1.en-US.linux-x86_64.tar.bz2",
 		name:    "firefox-57.0a1.en-US.linux-x86_64.tar.bz2",
@@ -66,6 +63,37 @@ var files = []file{
 		hash:   "b1bedccc2690b48d6708ac71f23189c85b0da62c56ee943a1b20d8f17fa8bbde",
 		rename: []string{"sc-4.4.9-linux", "sauce-connect"},
 	},
+}
+
+func latestGitHubRelease(ctx context.Context, g gitHubRelease) (url string, err error) {
+	client := github.NewClient(nil)
+
+	rels, _, err := client.Repositories.ListReleases(ctx, g.owner, g.repo, nil)
+	if err != nil {
+		return "", err
+	}
+	var latest semver.Version
+	var latestRelease *github.RepositoryRelease
+	for _, r := range rels {
+		ver, err := semver.ParseTolerant(*r.TagName)
+		if err != nil {
+			glog.V(1).Infof("Invalid tag name: %s/%s %s", g.owner, g.repo, *r.TagName)
+			continue
+		}
+		if ver.GT(latest) {
+			latest = ver
+			latestRelease = r
+		}
+	}
+	for _, a := range latestRelease.Assets {
+		if a.BrowserDownloadURL == nil {
+			continue
+		}
+		if strings.Contains(*a.BrowserDownloadURL, g.filter) {
+			return *a.BrowserDownloadURL, nil
+		}
+	}
+	return "", fmt.Errorf("release for %s/%s containing %q not found", g.owner, g.repo, g.filter)
 }
 
 func addChrome(ctx context.Context) error {
@@ -108,25 +136,124 @@ func addChrome(ctx context.Context) error {
 	return nil
 }
 
+type gitHubRelease struct {
+	owner, repo, filter string
+}
+
+var gitHubReleases = []gitHubRelease{{
+	owner:  "mozilla",
+	repo:   "geckodriver",
+	filter: "-linux64",
+}}
+
+func latestSeleniumRelease(ctx context.Context) (url string, err error) {
+	const (
+		// Bucket URL: https://console.cloud.google.com/storage/browser/selenium-release/?pli=1
+		// The object name resembles: 3.8/selenium-server-standalone-3.8.1.jar
+		storageBktName = "selenium-release"
+		prefixLinux64  = "Linux_x64"
+	)
+	client, err := storage.NewClient(ctx, option.WithHTTPClient(http.DefaultClient))
+	if err != nil {
+		return "", fmt.Errorf("cannot create a storage client for downloading the chrome browser: %v", err)
+	}
+	bkt := client.Bucket(storageBktName)
+
+	object := ""
+	latest := semver.Version{}
+	it := bkt.Objects(ctx, nil)
+	for {
+		o, err := it.Next()
+		if err != nil {
+			if err == iterator.Done {
+				break
+			}
+			return "", err
+		}
+
+		// The file name of interest is of the form
+		// "3.8/selenium-server-standalone-3.8.1.jar".
+		const filePrefix = "selenium-server-standalone-"
+		i := strings.Index(o.Name, filePrefix)
+		if i < 0 {
+			continue
+		}
+		// Strip off everything through the prefix, plus the ".jar" suffix.
+		n := o.Name[i+len(filePrefix) : len(o.Name)-4]
+		os, err := semver.ParseTolerant(n)
+		if err != nil {
+			glog.V(1).Infof("Error parsing object name %s in bucket %s: %s", o.Name, o.Bucket, err)
+			continue
+		}
+		if os.GT(latest) {
+			latest = os
+			object = o.Name
+		}
+	}
+	if object == "" {
+		return "", fmt.Errorf("no release found")
+	}
+	return object, nil
+}
+
 func main() {
 	flag.Parse()
 	ctx := context.Background()
+
 	if *downloadBrowsers {
 		if err := addChrome(ctx); err != nil {
 			glog.Errorf("unable to Download Google Chrome browser: %v", err)
 		}
 	}
 	var wg sync.WaitGroup
-	for _, file := range files {
+	/*
+		for _, file := range files {
+			wg.Add(1)
+			file := file
+			go func() {
+				if err := handleFile(file); err != nil {
+					glog.Exitf("Error handling %s: %s", file.name, err)
+				}
+				wg.Done()
+			}()
+		}
+	*/
+
+	for _, r := range gitHubReleases {
+		r := r
 		wg.Add(1)
-		file := file
 		go func() {
-			if err := handleFile(file); err != nil {
-				glog.Exitf("Error handling %s: %s", file.name, err)
+			defer wg.Done()
+
+			url, err := latestGitHubRelease(ctx, r)
+			if err != nil {
+				glog.Exitf("Error handling %s/%s: %s", r.owner, r.repo, err)
 			}
-			wg.Done()
+			err = handleFile(file{
+				url:  url,
+				name: path.Base(url),
+			})
+			if err != nil {
+				glog.Exitf("Error handling %s/%s: %s", r.owner, r.repo, err)
+			}
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		// TODO(ekg): return the MD5 sum from the object and check it.
+		url, err := latestSeleniumRelease(ctx)
+		if err != nil {
+			glog.Exitf("Error fetching the latest Selenium release: %s", err)
+		}
+		err = handleFile(file{
+			url:  url,
+			name: path.Base(url),
+		})
+		if err != nil {
+			glog.Exitf("Error fetching the latest Selenium release: %s", err)
+		}
+	}()
 	wg.Wait()
 }
 
@@ -135,13 +262,12 @@ func handleFile(file file) error {
 		glog.Infof("Skipping %q because --download_browser is not set.", file.name)
 		return nil
 	}
-	if !fileSameHash(file) {
+
+	if _, err := os.Stat(file.name); err != nil {
 		glog.Infof("Downloading %q from %q", file.name, file.url)
 		if err := downloadFile(file); err != nil {
 			return err
 		}
-	} else {
-		glog.Infof("Skipping file %q which has already been downloaded.", file.name)
 	}
 
 	switch path.Ext(file.name) {
@@ -197,37 +323,5 @@ func downloadFile(file file) (err error) {
 	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
 		return fmt.Errorf("%s: error downloading %q: %v", file.name, file.url, err)
 	}
-	if h := hex.EncodeToString(h.Sum(nil)); h != file.hash {
-		return fmt.Errorf("%s: got %s hash %q, want %q", file.name, file.hashType, h, file.hash)
-	}
 	return nil
-}
-
-func fileSameHash(file file) bool {
-	if _, err := os.Stat(file.name); err != nil {
-		return false
-	}
-	var h hash.Hash
-	switch strings.ToLower(file.hashType) {
-	case "md5":
-		h = md5.New()
-	default:
-		h = sha256.New()
-	}
-	f, err := os.Open(file.name)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(h, f); err != nil {
-		return false
-	}
-
-	sum := hex.EncodeToString(h.Sum(nil))
-	if sum != file.hash {
-		glog.Warningf("File %q: got hash %q, expect hash %q", file.name, sum, file.hash)
-		return false
-	}
-	return true
 }
